@@ -5,7 +5,6 @@ Onion is a lightweight and minimalist wrapper for Go's `http` module. It aims to
 ## Features
 - **Easy Routing**: Define routes with simple `app.Get`, `app.Post`, etc.
 - **Middleware**: Global or route-specific middleware with `app.Use`.
-- **Route Groups**: Prefix-based route grouping with `app.Group`.
 - **JSON Parsing**: Automatic decoding of JSON into structs.
 - **Path Parameters**: Extract parameters like `/users/:id`.
 - **NotFoundHandler**: Customizable 404 pages.
@@ -34,11 +33,6 @@ func main() {
     // Add global middleware
     app.Use(middlewares.Auth)
     app.Use(middlewares.Log)
-
-    // Define route groups
-    admin := app.Group("/admin")
-    admin.Use(middlewares.AdminAuth)
-    admin.MapRoutes(routes.AdminRoutes)
 
     // Map general routes
     app.MapRoutes(routes.UserRoutes, routes.BookRoutes)
