@@ -62,13 +62,16 @@ func (a *App) handle(method, pattern string, handler HandlerFunc) {
             a.notFound(&Context{Response: w, Request: r})
             return
         }
+
         c := &Context{Response: w, Request: r}
         for _, mw := range a.middlewares {
             mw(c)
         }
+
         handler(c)
     })
 }
+
 
 func (a *App) Group(prefix string) *Group {
     g := &Group{
