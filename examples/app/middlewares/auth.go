@@ -2,6 +2,8 @@ package middlewares
 
 import (
 	"net/http"
+
+	onion "github.com/saeedalam/Onion"
 )
 
 func Auth(c *onion.Context) {
