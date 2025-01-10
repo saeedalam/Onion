@@ -2,8 +2,7 @@ package middlewares
 
 import (
 	"fmt"
-
-	onion "github.com/saeedalam/Onion"
+	"onion"
 )
 
 func Log(c *onion.Context) {

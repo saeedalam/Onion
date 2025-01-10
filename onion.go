@@ -1,69 +1,66 @@
 package onion
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 )
 
 // HandlerFunc defines the function signature for route handlers.
-// Each handler takes a pointer to Context, which provides convenience methods
-// for working with HTTP requests and responses.
 type HandlerFunc func(*Context)
 
-// Context wraps http.ResponseWriter and *http.Request, plus path parameters and utilities.
-// This struct provides helper methods for sending responses and accessing request data.
+// Context wraps http.ResponseWriter and *http.Request, plus path parameters.
 type Context struct {
-	Response http.ResponseWriter // The response writer for sending HTTP responses
-	Request  *http.Request       // The incoming HTTP request
-	params   map[string]string   // Path parameters extracted from the URL
+	Response http.ResponseWriter
+	Request  *http.Request
+	params   map[string]string
 }
 
-// String sends a plain text response with a given status code.
+// String is a helper for sending plain text.
 func (c *Context) String(statusCode int, msg string) {
 	c.Response.WriteHeader(statusCode)
 	c.Response.Write([]byte(msg))
 }
 
-// JSON sends a JSON response with a given status code.
-// For simplicity, it uses fmt.Fprintf to serialize the data.
+// JSON is a helper for sending JSON data.
 func (c *Context) JSON(statusCode int, data interface{}) {
 	c.Response.Header().Set("Content-Type", "application/json")
 	c.Response.WriteHeader(statusCode)
-	fmt.Fprintf(c.Response, "%v", data) // Replace with json.Marshal for proper JSON serialization
+	json.NewEncoder(c.Response).Encode(data)
 }
 
-// Param retrieves a path parameter by name.
-// Example: Given the route "/users/:id" and path "/users/123",
-// calling c.Param("id") will return "123".
+// Param fetches a path param like ":bookId".
 func (c *Context) Param(key string) string {
 	return c.params[key]
 }
 
 // ----------------------------------------------------
-// App: The main Onion application struct
+// App (the main Onion application struct)
 // ----------------------------------------------------
 
-// App represents the Onion application.
-// It includes routing, middleware, and error handling capabilities.
 type App struct {
-	mux         *http.ServeMux // The HTTP multiplexer for routing
-	middlewares []HandlerFunc  // Global middlewares applied to all requests
-	notFound    HandlerFunc    // Custom 404 handler
+	mux         *http.ServeMux
+	middlewares []HandlerFunc
+	notFound    HandlerFunc
+
+	// We'll store routes here in a map, keyed by (method, pattern)
+	routes map[routeKey]HandlerFunc
+}
+
+type routeKey struct {
+	method  string
+	pattern string
 }
 
 // Route defines a single HTTP route.
-// Method: HTTP method (e.g., GET, POST).
-// Pattern: URL pattern (e.g., "/users/:id").
-// Handler: Function to handle the route.
 type Route struct {
 	Method  string
 	Pattern string
 	Handler HandlerFunc
 }
 
-// New creates a new Onion application with default settings.
-// Initializes an empty router and a default 404 handler.
+// New creates a new Onion app
 func New() *App {
 	return &App{
 		mux:         http.NewServeMux(),
@@ -71,83 +68,171 @@ func New() *App {
 		notFound: func(c *Context) {
 			http.NotFound(c.Response, c.Request)
 		},
+		routes: make(map[routeKey]HandlerFunc),
 	}
 }
 
-// Use adds a global middleware to the application.
-// Middlewares are executed in the order they are added.
+// Use registers a middleware that will run before route handlers.
 func (a *App) Use(mw HandlerFunc) {
 	a.middlewares = append(a.middlewares, mw)
 }
 
-// NotFoundHandler sets a custom 404 handler for unknown routes.
+// NotFoundHandler sets a custom 404.
 func (a *App) NotFoundHandler(fn HandlerFunc) {
 	a.notFound = fn
 }
 
-// MapRoutes maps multiple route slices to the application.
-// Allows batch registration of routes, useful for grouping routes by feature.
-func (a *App) MapRoutes(routeGroups ...[]Route) {
-	for _, groupRoutes := range routeGroups {
-		for _, r := range groupRoutes {
+// UseRoutes loads multiple route slices (like BookRoutes, UserRoutes).
+func (a *App) UseRoutes(routeGroups ...[]Route) {
+	for _, group := range routeGroups {
+		for _, r := range group {
 			a.handle(r.Method, r.Pattern, r.Handler)
 		}
 	}
 }
 
-// handle registers a single route with the application.
-// Extracts path parameters and executes middlewares before calling the route handler.
+// handle just stores the route in our map. We do the actual matching in dispatch().
 func (a *App) handle(method, pattern string, handler HandlerFunc) {
-	a.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != method {
-			a.notFound(&Context{Response: w, Request: r})
-			return
-		}
-
-		// Extract path parameters
-		params := extractParams(pattern, r.URL.Path)
-
-		// Prepare the context
-		c := &Context{
-			Response: w,
-			Request:  r,
-			params:   params,
-		}
-
-		// Execute middlewares
-		for _, mw := range a.middlewares {
-			mw(c)
-		}
-
-		// Call the route handler
-		handler(c)
-	})
+	a.routes[routeKey{method, pattern}] = handler
 }
 
-// Run starts the Onion HTTP server on the specified address.
-// Example: app.Run(":8080") to start on port 8080.
+// Run starts the server. Here we register one wildcard handleFunc to dispatch.
 func (a *App) Run(addr string) error {
-	fmt.Printf("Onion server running on %s\n", addr)
+	fmt.Println("Onion server running on", addr)
+
+	// Register exactly one fallback route: "/"
+	a.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		a.dispatch(w, r)
+	})
+
 	return http.ListenAndServe(addr, a.mux)
 }
 
-// ----------------------------------------------------
-// Helper Functions
-// ----------------------------------------------------
+// dispatch finds a matching route by (method, path), extracts params, executes middlewares, etc.
+func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
+	reqPath := r.URL.Path
+	reqMethod := r.Method
 
-// extractParams extracts path parameters from the URL based on the pattern.
-// Example: For pattern "/users/:id" and path "/users/123", it returns {"id": "123"}.
-func extractParams(pattern, path string) map[string]string {
-	params := make(map[string]string)
-	patternParts := strings.Split(pattern, "/")
-	pathParts := strings.Split(path, "/")
+	// We'll do a param-capable match. For example, if the user route is "/books/:bookId"
+	// and the incoming path is "/books/123", we want to pick that route and fill param "bookId" = "123".
+	//
+	// Steps:
+	//   1) Scan all known routes for any that match the method
+	//   2) For each route with same method, check if the path matches (with param placeholders)
+	//   3) If found, parse out params and call its handler
+	//   4) Otherwise fallback to 404
 
-	for i := 0; i < len(patternParts) && i < len(pathParts); i++ {
-		if strings.HasPrefix(patternParts[i], ":") {
-			key := strings.TrimPrefix(patternParts[i], ":")
-			params[key] = pathParts[i]
+	for key, handler := range a.routes {
+		if key.method == reqMethod {
+			params, ok := matchWithParams(key.pattern, reqPath)
+			if ok {
+				c := &Context{
+					Response: w,
+					Request:  r,
+					params:   params,
+				}
+
+				// Middlewares
+				for _, mw := range a.middlewares {
+					mw(c)
+				}
+
+				// Handler
+				handler(c)
+				return
+			}
 		}
 	}
 
-	return params
+	// If we reach here, no route matched => 404
+	a.notFound(&Context{Response: w, Request: r})
+}
+
+// matchWithParams checks if the "pattern" (like "/books/:bookId") matches "path" ("/books/123").
+// If it matches, returns (map[string]string, true). If not, returns (nil, false).
+func matchWithParams(pattern, path string) (map[string]string, bool) {
+	pParts := strings.Split(pattern, "/")
+	pathParts := strings.Split(path, "/")
+
+	// They must have the same number of segments
+	if len(pParts) != len(pathParts) {
+		return nil, false
+	}
+
+	params := make(map[string]string)
+
+	for i := 0; i < len(pParts); i++ {
+		pp := pParts[i]
+		pa := pathParts[i]
+
+		if strings.HasPrefix(pp, ":") {
+			// param placeholder
+			key := strings.TrimPrefix(pp, ":")
+			params[key] = pa
+		} else if pp != pa {
+			// mismatch
+			return nil, false
+		}
+	}
+
+	return params, true
+}
+
+// ----------------------------------------------------
+// RouteGroup (Fluent group builder)
+// ----------------------------------------------------
+
+type RouteGroup struct {
+	prefix string
+	routes []Route
+}
+
+// NewGroup("books") => prefix = "books"
+func NewGroup(prefix string) *RouteGroup {
+	return &RouteGroup{
+		prefix: prefix,
+		routes: []Route{},
+	}
+}
+
+// GET etc. Just appends a Route with the correct method, path, handler
+func (rg *RouteGroup) GET(pattern string, handler HandlerFunc) *RouteGroup {
+	rg.routes = append(rg.routes, Route{
+		Method:  http.MethodGet,
+		Pattern: "/" + rg.prefix + pattern,
+		Handler: handler,
+	})
+	return rg
+}
+
+func (rg *RouteGroup) POST(pattern string, handler HandlerFunc) *RouteGroup {
+	rg.routes = append(rg.routes, Route{
+		Method:  http.MethodPost,
+		Pattern: "/" + rg.prefix + pattern,
+		Handler: handler,
+	})
+	return rg
+}
+
+func (rg *RouteGroup) PUT(pattern string, handler HandlerFunc) *RouteGroup {
+	rg.routes = append(rg.routes, Route{
+		Method:  http.MethodPut,
+		Pattern: "/" + rg.prefix + pattern,
+		Handler: handler,
+	})
+	return rg
+}
+
+func (rg *RouteGroup) DELETE(pattern string, handler HandlerFunc) *RouteGroup {
+	rg.routes = append(rg.routes, Route{
+		Method:  http.MethodDelete,
+		Pattern: "/" + rg.prefix + pattern,
+		Handler: handler,
+	})
+	return rg
+}
+
+// Routes returns the final []Route
+func (rg *RouteGroup) Routes() []Route {
+	return rg.routes
 }

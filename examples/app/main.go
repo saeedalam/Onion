@@ -1,22 +1,25 @@
 package main
 
 import (
-	"example/middlewares"
-	"example/routes"
-
-	onion "github.com/saeedalam/Onion"
+	"fmt"
+	"onion"
+	"onion/examples/app/routes"
 )
 
 func main() {
 	app := onion.New()
-	app.Use(middlewares.Auth)
-	app.Use(middlewares.Log)
 
-	app.MapRoutes(routes.UserRoutes, routes.BookRoutes)
-
-	app.NotFoundHandler(func(c *onion.Context) {
-		c.String(404, "Custom 404 message!")
+	// Global middleware
+	app.Use(func(c *onion.Context) {
+		fmt.Println("Executing global middleware")
 	})
 
+	// Register routes
+	app.UseRoutes(
+		routes.BookRoutes,
+		routes.UserRoutes,
+	)
+
+	// Start the server
 	app.Run(":3333")
 }
